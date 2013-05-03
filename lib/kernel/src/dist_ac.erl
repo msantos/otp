@@ -512,8 +512,16 @@ handle_info({dist_ac_new_node, _Vsn, Node, HisAppls, []}, S) ->
     {noreply, S#state{appls = NAppls, known = [Node | S#state.known]}};
 
 handle_info({dist_ac_app_started, Node, Name, Res}, S) ->
-    case {keysearch(Name, #appl.name, S#state.appls), lists:member(Name, S#state.started)} of
-	{{value, Appl}, true} ->
+    ResAppl =  keysearch(Name, #appl.name, S#state.appls),
+    ResDistHere = case ResAppl of
+	{value, Tappl} ->
+	    lists:member(Node, flat_nodes(Tappl#appl.nodes));
+	false ->
+	    false
+    end,
+    ResStarted = lists:member(Name, S#state.started),
+    case {ResAppl, ResDistHere, ResStarted} of
+	{{value, Appl}, true, true} ->
 	    Appls = S#state.appls,
 	    NId = case Appl#appl.id of
 		      _ when element(1, Res) =:= error ->
@@ -545,7 +553,7 @@ handle_info({dist_ac_app_started, Node, Name, Res}, S) ->
 		{ok, NewS2} ->
 		    {noreply, NewS2}
 	    end;
-	{_, _} ->
+	{_, _, _} ->
 	    %% The app has not been started at this node yet; remember this in
 	    %% remote started.
 	    NRStarted = [{Node, Name} | S#state.remote_started],
@@ -1412,10 +1420,8 @@ do_dist_change_update(Appls, AppName, NewTime, NewNodes) ->
 %% Merge his Permissions with mine.
 dist_merge(MyAppls, HisAppls, HisNode) ->
     zf(fun(Appl) ->
-	       #appl{name = AppName, run = Run} = Appl,
-%	       #appl{name = AppName, nodes = Nodes, run = Run} = Appl,
-%	       HeIsMember = lists:member(HisNode, flat_nodes(Nodes)),
-	       HeIsMember = true,
+	       #appl{name = AppName, nodes = Nodes, run = Run} = Appl,
+	       HeIsMember = lists:member(HisNode, flat_nodes(Nodes)),
 	       case keysearch(AppName, #appl.name, HisAppls) of
 		   {value, #appl{run = HisRun}} when HeIsMember ->
 		       case keysearch(HisNode, 1, HisRun) of

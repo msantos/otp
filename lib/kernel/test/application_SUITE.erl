@@ -115,7 +115,7 @@ loop_until_true(Fun) ->
 
 %%-----------------------------------------------------------------
 %% Should be started in a CC view with:
-%% erl -sname XXX -rsh ctrsh where XX not in [cp1, cp2, cp3]
+%% erl -sname XXX -rsh ctrsh where XX not in [cp1, cp2, cp3, cp4]
 %%-----------------------------------------------------------------
 failover(suite) -> [];
 failover(doc) ->
@@ -126,40 +126,72 @@ failover(Conf) when is_list(Conf) ->
     StPid = spawn_link(?MODULE, start_type, []),
     yes = global:register_name(st_type, StPid),
 
-    NodeNames = [Ncp1, Ncp2, Ncp3] = node_names([cp1, cp2, cp3], Conf),
-    NoSyncTime = config_fun_fast(config_fo(NodeNames)),
-    WithSyncTime = config_fun(config_fo(NodeNames)),
+    NodeNames = [Ncp1, Ncp2, Ncp3, Ncp4]
+	    = node_names([cp1, cp2, cp3, cp4], Conf),
+    Cp1NoSyncTime = config_fun_fast(config_fo1(NodeNames)),
+    Cp2NoSyncTime = config_fun_fast(config_fo2(NodeNames)),
+    Cp3NoSyncTime = config_fun_fast(config_fo3(NodeNames)),
+    Cp4WithSyncTime = config_fun(config_fo4(NodeNames)),
 
-    % Test [cp1, cp2, cp3]
-    {ok, Cp1} = start_node_config(Ncp1, NoSyncTime, Conf),
-    {ok, Cp2} = start_node_config(Ncp2, NoSyncTime, Conf),
-    {ok, Cp3} = start_node_config(Ncp3, WithSyncTime, Conf),
-    Cps = [Cp1, Cp2, Cp3],
+    % Test [cp1, cp2, cp3, cp4]
+    {ok, Cp1} = start_node_config(Ncp1, Cp1NoSyncTime, Conf),
+    {ok, Cp2} = start_node_config(Ncp2, Cp2NoSyncTime, Conf),
+    {ok, Cp3} = start_node_config(Ncp3, Cp3NoSyncTime, Conf),
+    {ok, Cp4} = start_node_config(Ncp4, Cp4WithSyncTime, Conf),
+    Cps = [Cp1, Cp2, Cp3, Cp4],
     wait_for_ready_net(),
 
     % Start app1 and make sure cp1 starts it
-    {[ok,ok,ok],[]} = 
-        rpc:multicall(Cps, application, load, [app1()]),
-    ?UNTIL(is_loaded(app1, Cps)),
-    {[ok,ok,ok],[]} = 
-        rpc:multicall(Cps, application, start, [app1, permanent]),
+    {[ok,ok,ok],[]} =
+        rpc:multicall([Cp1, Cp2, Cp3], application, load, [app1()]),
+    ?UNTIL(is_loaded(app1, [Cp1, Cp2, Cp3])),
+    {[ok,ok,ok],[]} =
+        rpc:multicall([Cp1, Cp2, Cp3], application, start, [app1, permanent]),
     ?UNTIL(is_started(app1, Cp1)),
     false = is_started(app1, Cp2),
+    false = is_started(app1, Cp3),
+    false = is_started(app1, Cp4),
     ok = get_start_type(#st{normal = 3}),
 
-    % Stop cp1 and make sure cp2 starts app1
+    % Start app_no and make sure cp1 & cp3 starts it
+    {[ok,ok,ok,ok],[]} =
+        rpc:multicall(Cps, application, load, [app_no()]),
+    ?UNTIL(is_loaded(app_no, Cps)),
+    {[ok,ok,ok,ok],[]} =
+        rpc:multicall(Cps, application, start, [app_no, permanent]),
+    ?UNTIL(is_started(app_no, Cp1)),
+    false = is_started(app_no, Cp2),
+    ?UNTIL(is_started(app_no, Cp3)),
+    false = is_started(app_no, Cp4),
+    ok = get_start_type(#st{normal = 6}),
+
+    % Stop cp1 and make sure cp2 starts app1 & app_no
     stop_node_nice(Cp1),
     ?UNTIL(is_started(app1, Cp2)),
-    ok = get_start_type(#st{normal = 3}),
+    ?UNTIL(is_started(app_no, Cp2)),
+    ok = get_start_type(#st{normal = 6}),
 
-    % Restart cp1 and make sure it restarts app1
-    {ok, Cp1_2} = start_node_config(Ncp1, NoSyncTime, Conf),
+    % make sure cp3 is still running app_no
+    true = is_started(app_no, Cp3),
+    false = is_started(app_no, Cp4),
+
+    % Restart cp1 and make sure it restarts app1 & app_no
+    {ok, Cp1_2} = start_node_config(Ncp1, Cp1NoSyncTime, Conf),
     global:sync(),
     ok = rpc:call(Cp1_2, application, load, [app1()]),
+    ok = rpc:call(Cp1_2, application, load, [app_no()]),
     ok = rpc:call(Cp1_2, application, start, [app1, permanent]),
+    ok = rpc:call(Cp1_2, application, start, [app_no, permanent]),
     ?UNTIL(is_started(app1, Cp1)),
     ?UNTIL(not is_started(app1, Cp2)),
-    ok = get_start_type(#st{takeover = 3}),
+    ?UNTIL(is_started(app_no, Cp1)),
+    ?UNTIL(not is_started(app_no, Cp2)),
+    false = is_started(app1, Cp3),
+    ok = get_start_type(#st{takeover = 6}),
+
+    % make sure cp3 is still running app_no
+    true = is_started(app_no, Cp3),
+    false = is_started(app_no, Cp4),
 
     % Test [{cp1, cp2}, cp3]
     % Start app_sp and make sure cp2 starts it (cp1 has more apps started)
@@ -170,6 +202,7 @@ failover(Conf) when is_list(Conf) ->
     ?UNTIL(is_started(app_sp, Cp2)),
     false = is_started(app_sp, Cp1),
     false = is_started(app_sp, Cp3),
+    false = is_started(app_sp, Cp4),
     ok = get_start_type(#st{normal = 3}),
 	
     % Stop cp2 and make sure cp1 starts app_sp
@@ -177,34 +210,69 @@ failover(Conf) when is_list(Conf) ->
     ?UNTIL(is_started(app_sp, Cp1_2)),
     ok = get_start_type(#st{failover = 3}),
 	
+    % make sure cp1 & cp3 are still running app_no
+    true = is_started(app_no, Cp1),
+    true = is_started(app_no, Cp3),
+    false = is_started(app_no, Cp4),
+
     % Stop cp1 and make sure cp3 starts app_sp
     stop_node_nice(Cp1_2),
     ?UNTIL(is_started(app_sp, Cp3)),
     ok = get_start_type(#st{normal = 3, failover = 3}),
 
-    % Restart cp2 and make sure it restarts app_sp
-    {ok, Cp2_2} = start_node_config(Ncp2, NoSyncTime, Conf),
+    % make sure cp3 is still running app_no
+    true = is_started(app_no, Cp3),
+    false = is_started(app_no, Cp4),
+
+    % Restart cp2 and make sure it restarts app_sp & app_no
+    {ok, Cp2_2} = start_node_config(Ncp2, Cp2NoSyncTime, Conf),
     global:sync(),
     ok = rpc:call(Cp2_2, application, load, [app_sp()]),
+    ok = rpc:call(Cp2_2, application, load, [app_no()]),
     ok = rpc:call(Cp2_2, application, start, [app_sp, permanent]),
+    ok = rpc:call(Cp2_2, application, start, [app_no, permanent]),
     ?UNTIL(is_started(app_sp, Cp2_2)),
+    ?UNTIL(is_started(app_no, Cp2_2)),
     ?UNTIL(not is_started(app_sp, Cp3)),
-    ok = get_start_type(#st{takeover = 3}),
+    ok = get_start_type(#st{takeover = 6}),
 
-    % Restart cp1 and make sure it doesn't restart app_sp
-    {ok, Cp1_3} = start_node_config(Ncp1, NoSyncTime, Conf),
+    % make sure cp3 is still running app_no
+    true = is_started(app_no, Cp3),
+    false = is_started(app_no, Cp4),
+
+    % Restart cp1 and make sure it doesn't restart app_sp and does start app_no
+    {ok, Cp1_3} = start_node_config(Ncp1, Cp1NoSyncTime, Conf),
     global:sync(),
     ok = rpc:call(Cp1_3, application, load, [app_sp()]),
+    ok = rpc:call(Cp1_3, application, load, [app_no()]),
     ok = rpc:call(Cp1_3, application, start, [app_sp, permanent]),
+    ok = rpc:call(Cp1_3, application, start, [app_no, permanent]),
     test_server:sleep(500),
     false = is_started(app_sp, Cp1_3),
     true = is_started(app_sp, Cp2_2),
+    ?UNTIL(is_started(app_no, Cp1_3)),
+    ?UNTIL(not is_started(app_no, Cp2_2)),
+    ok = get_start_type(#st{takeover = 3}),
 
-    % Force takeover to cp1
+    % make sure cp3 is still running app_no
+    true = is_started(app_no, Cp3),
+    false = is_started(app_no, Cp4),
+
+    % Force app_sp takeover to cp1
     ok = rpc:call(Cp1_3, application, takeover, [app_sp, permanent]),
     ?UNTIL(is_started(app_sp, Cp1_3)),
     ?UNTIL(not is_started(app_sp, Cp2_2)),
     ok = get_start_type(#st{takeover = 3}),
+
+    % Force app_no takeover to cp4
+    ok = rpc:call(Cp4, application, takeover, [app_no, permanent]),
+    ?UNTIL(is_started(app_no, Cp4)),
+    ?UNTIL(not is_started(app_no, Cp3)),
+    ok = get_start_type(#st{takeover = 3}),
+
+    % make sure cp1 is still running app_no
+    true = is_started(app_no, Cp1_3),
+    false = is_started(app_no, Cp2_2),
 
     %% Kill one child process and see that it is started with type local
     PP = global:whereis_name({ch,3}),
@@ -216,6 +284,7 @@ failover(Conf) when is_list(Conf) ->
     stop_node_nice(Cp1_3),
     stop_node_nice(Cp2_2),
     stop_node_nice(Cp3),
+    stop_node_nice(Cp4),
     ok.
     
 %%-----------------------------------------------------------------
@@ -559,10 +628,10 @@ script_start(Conf) when is_list(Conf) ->
     StPid = spawn_link(?MODULE, start_type, []),
     yes = global:register_name(st_type, StPid),
 
-
     % Create the .app files and the boot script
     ok = create_app(),
     {{KernelVer,StdlibVer}, _} = create_script("latest"),
+    {{KernelVer,StdlibVer}, _} = create_script_no("latest_no"),
     case is_real_system(KernelVer, StdlibVer) of
 	      true ->
 		  Options = [];
@@ -570,42 +639,71 @@ script_start(Conf) when is_list(Conf) ->
 		  Options = [local]
 	  end,
     ok = systools:make_script("latest", Options),
+    ok = systools:make_script("latest_no", Options),
 
-    NodeNames = [Ncp1, Ncp2, Ncp3] = node_names([cp1, cp2, cp3], Conf),
-    NoSyncTime = config_fun_fast(config_fo(NodeNames)),
-    WithSyncTime = config_fun(config_fo(NodeNames)),
+    NodeNames = [Ncp1, Ncp2, Ncp3, Ncp4]
+	    = node_names([cp1, cp2, cp3, cp4], Conf),
+    Cp1NoSyncTime = config_fun_fast(config_fo1(NodeNames)),
+    Cp2NoSyncTime = config_fun_fast(config_fo2(NodeNames)),
+    Cp3NoSyncTime = config_fun_fast(config_fo3(NodeNames)),
+    Cp4WithSyncTime = config_fun(config_fo4(NodeNames)),
 
-    % Test [cp1, cp2, cp3]
-    {ok, Cp1} = start_node_boot_config(Ncp1, NoSyncTime, Conf, latest),
-    {ok, Cp2} = start_node_boot_config(Ncp2, NoSyncTime, Conf, latest),
-    {ok, Cp3} = start_node_boot_config(Ncp3, WithSyncTime, Conf, latest),
+    % Test [cp1, cp2, cp3, cp4]
+    {ok, Cp1} = start_node_boot_config(Ncp1, Cp1NoSyncTime, Conf, latest),
+    {ok, Cp2} = start_node_boot_config(Ncp2, Cp2NoSyncTime, Conf, latest),
+    {ok, Cp3} = start_node_boot_config(Ncp3, Cp3NoSyncTime, Conf, latest),
+    {ok, Cp4} = start_node_boot_config(Ncp4, Cp4WithSyncTime, Conf, latest_no),
     wait_for_ready_net(),
-
     ?UNTIL(is_started(app1, Cp1)),
     ?UNTIL(is_started(app2, Cp1)),
     ?UNTIL(is_started(app_sp, Cp1)),
+    ?UNTIL(is_started(app_no, Cp1)),
+    ?UNTIL(is_started(app_no, Cp3)),
     false = is_started(app1, Cp2),
-    ok = get_start_type(#st{normal = 9}),
+    false = is_started(app2, Cp2),
+    false = is_started(app_sp, Cp2),
+    false = is_started(app_no, Cp2),
+    false = is_started(app1, Cp3),
+    false = is_started(app2, Cp3),
+    false = is_started(app_sp, Cp3),
+    false = is_started(app1, Cp4),
+    false = is_started(app2, Cp4),
+    false = is_started(app_sp, Cp4),
+    false = is_started(app_no, Cp4),
+    ok = get_start_type(#st{normal = 12}),
 
-    % Stop cp1 and make sure cp2 starts app1, app2 normally (no
-    % start_phases defined) and app_sp as failover (start_phases
-    % defined)
+    % Stop cp1 and make sure cp2 starts app1 and app2 normally
+    % (no start_phases defined), app_sp as failover (start_phases
+    % defined) and app_no as takeover (no start_phases defined)
     stop_node_nice(Cp1),
     ?UNTIL(is_started(app1, Cp2)),
     ?UNTIL(is_started(app2, Cp2)),
     ?UNTIL(is_started(app_sp, Cp2)),
-    ok = get_start_type(#st{normal = 6, failover = 3}),
+    ?UNTIL(is_started(app_no, Cp2)),
+    true = is_started(app_no, Cp3),
+    false = is_started(app1, Cp3),
+    false = is_started(app2, Cp3),
+    false = is_started(app_sp, Cp3),
+    false = is_started(app1, Cp4),
+    false = is_started(app2, Cp4),
+    false = is_started(app_sp, Cp4),
+    false = is_started(app_no, Cp4),
+    ok = get_start_type(#st{normal = 9, takeover = 3, failover = 3}),
 	
-    % Restart cp1, Cp1 takesover app1 and app2
-    {ok, Cp1_2} = start_node_boot_config(Ncp1, NoSyncTime, Conf, latest),
+    % Restart cp1, cp1 takes over app1, app2 and app_no
+    {ok, Cp1_2} = start_node_boot_config(Ncp1, Cp1NoSyncTime, Conf, latest),
     global:sync(),
     ?UNTIL(is_started(app1, Cp1_2)),
     false = is_started(app1, Cp2),
     ?UNTIL(is_started(app2, Cp1_2)),
+    ?UNTIL(is_started(app_no, Cp1_2)),
     true = is_started(app_sp, Cp2),
     ?UNTIL(not is_started(app1, Cp2)),
     ?UNTIL(not is_started(app2, Cp2)),
-    ok = get_start_type(#st{takeover = 6}),
+    ?UNTIL(not is_started(app_no, Cp2)),
+    true = is_started(app_no, Cp3),
+    false = is_started(app_no, Cp4),
+    ok = get_start_type(#st{takeover = 9}),
 	
     % Stop cp2 and make sure cp1 starts app_sp.
     false = is_started(app_sp, Cp1_2),
@@ -618,34 +716,49 @@ script_start(Conf) when is_list(Conf) ->
     ?UNTIL(is_started(app_sp, Cp3)),
     ?UNTIL(is_started(app1, Cp3)),
     ?UNTIL(is_started(app2, Cp3)),
+    true = is_started(app_no, Cp3),
+    false = is_started(app_no, Cp4),
     ok = get_start_type(#st{normal = 6, failover = 3}),
 	
-    % Restart cp2 and make sure it takesover app1, app2 and app_sp
-    {ok, Cp2_2} = start_node_boot_config(Ncp2, NoSyncTime, Conf, latest),
+    % Restart cp2 and make sure it takes over app1, app2, app_sp app_no
+    {ok, Cp2_2} = start_node_boot_config(Ncp2, Cp2NoSyncTime, Conf, latest),
     global:sync(),
     ?UNTIL(is_started(app_sp, Cp2_2)),
     ?UNTIL(is_started(app1, Cp2_2)),
     ?UNTIL(is_started(app2, Cp2_2)),
+    ?UNTIL(is_started(app_no, Cp2_2)),
     ?UNTIL(not is_started(app_sp, Cp3)),
     ?UNTIL(not is_started(app1, Cp3)),
     ?UNTIL(not is_started(app2, Cp3)),
-    ok = get_start_type(#st{takeover = 9}),
+    true = is_started(app_no, Cp3),
+    false = is_started(app_no, Cp4),
+    ok = get_start_type(#st{takeover = 12}),
 
-    % Restart cp1 and make sure it takesover app1, app2
-    {ok, Cp1_3} = start_node_boot_config(Ncp1, NoSyncTime, Conf, latest),
+    % Restart cp1 and make sure it takesover app1, app2 and app_no
+    {ok, Cp1_3} = start_node_boot_config(Ncp1, Cp1NoSyncTime, Conf, latest),
     global:sync(),
     ?UNTIL(is_started(app1, Cp1_3)),
     ?UNTIL(is_started(app2, Cp1_3)),
+    ?UNTIL(is_started(app_no, Cp1_3)),
     false = is_started(app_sp, Cp1_3),
     true = is_started(app_sp, Cp2_2),
     ?UNTIL(not is_started(app1, Cp2_2)),
     ?UNTIL(not is_started(app2, Cp2_2)),
-    ok = get_start_type(#st{takeover = 6}),
+    ?UNTIL(not is_started(app_no, Cp2_2)),
+    ok = get_start_type(#st{takeover = 9}),
 
-    % Force takeover to cp1
+    % Force app_sp takeover to cp1
     ok = rpc:call(Cp1_3, application, takeover, [app_sp, permanent]),
     ?UNTIL(is_started(app_sp, Cp1_3)),
     ?UNTIL(not is_started(app_sp, Cp2_2)),
+    ok = get_start_type(#st{takeover = 3}),
+
+    % Force app_no takeover to cp4
+    ok = rpc:call(Cp4, application, takeover, [app_no, permanent]),
+    ?UNTIL(is_started(app_no, Cp4)),
+    ?UNTIL(not is_started(app_no, Cp3)),
+    true = is_started(app_no, Cp1),
+    false = is_started(app_no, Cp2),
     ok = get_start_type(#st{takeover = 3}),
 
     %% Kill one child process and see that it is started with type local
@@ -658,6 +771,7 @@ script_start(Conf) when is_list(Conf) ->
     stop_node_nice(Cp1_3),
     stop_node_nice(Cp2_2),
     stop_node_nice(Cp3),
+    stop_node_nice(Cp4),
     
     ok = file:delete("latest.boot"),
     ok = file:delete("latest.rel"),
@@ -2098,6 +2212,15 @@ app_sp() ->
       {registered, []},
       {mod, {application_starter, [ch_sup, {app_sp, 31, 33}] }}]}. 
 
+app_no() ->
+    {application, app_no,
+     [{description, "Test of active/standby pairs on non overlapping nodes"},
+      {vsn, "1.0"},
+      {applications, [kernel]},
+      {modules, []},
+      {registered, []},
+      {mod, {ch_sup, {app_no, 34, 36}}}]}.
+
 app_trans_normal() ->
     {application, trans_normal,
      [{description, "A  CXC 138 11"},
@@ -2292,7 +2415,43 @@ config_sf([Ncp1, Ncp2, Ncp3]) ->
                        Ncp1, M, Ncp2, M, Ncp3, M])
     end.
 
-config_fo([Ncp1, Ncp2, Ncp3]) ->
+config_fo1([Ncp1, Ncp2, Ncp3, _Ncp4]) ->
+    fun(Fd, SyncNodesTimeout) ->
+            M = from($@, atom_to_list(node())),
+            io:format(Fd, "[{kernel, [{sync_nodes_optional, "
+                      "['~s@~s','~s@~s']},"
+                      "{sync_nodes_timeout, ~w},"
+                      "{distributed, [{app1, ['~s@~s', '~s@~s', '~s@~s']},"
+                      "{app2, 2000, ['~s@~s', '~s@~s', '~s@~s']},"
+                      "{app_sp, 1000, [{'~s@~s', '~s@~s'}, '~s@~s']},"
+                      "{app_no, 1000, ['~s@~s', '~s@~s']}]}]}].~n",
+                      [Ncp2, M, Ncp3, M,
+                       SyncNodesTimeout,
+                       Ncp1, M, Ncp2, M, Ncp3, M,
+                       Ncp1, M, Ncp2, M, Ncp3, M,
+                       Ncp1, M, Ncp2, M, Ncp3, M,
+                       Ncp1, M, Ncp2, M])
+    end.
+
+config_fo2([Ncp1, Ncp2, Ncp3, _Ncp4]) ->
+    fun(Fd, SyncNodesTimeout) ->
+            M = from($@, atom_to_list(node())),
+            io:format(Fd, "[{kernel, [{sync_nodes_optional, "
+                      "['~s@~s','~s@~s']},"
+                      "{sync_nodes_timeout, ~w},"
+                      "{distributed, [{app1, ['~s@~s', '~s@~s', '~s@~s']},"
+                      "{app2, 2000, ['~s@~s', '~s@~s', '~s@~s']},"
+                      "{app_sp, 1000, [{'~s@~s', '~s@~s'}, '~s@~s']},"
+                      "{app_no, 1000, ['~s@~s', '~s@~s']}]}]}].~n",
+                      [Ncp1, M, Ncp3, M,
+                       SyncNodesTimeout,
+                       Ncp1, M, Ncp2, M, Ncp3, M,
+                       Ncp1, M, Ncp2, M, Ncp3, M,
+                       Ncp1, M, Ncp2, M, Ncp3, M,
+                       Ncp1, M, Ncp2, M])
+    end.
+
+config_fo3([Ncp1, Ncp2, Ncp3, Ncp4]) ->
     fun(Fd, SyncNodesTimeout) ->
             M = from($@, atom_to_list(node())),
             io:format(Fd, "[{kernel, [{sync_nodes_optional, "
@@ -2300,12 +2459,27 @@ config_fo([Ncp1, Ncp2, Ncp3]) ->
                       "{sync_nodes_timeout, ~w},"
                       "{distributed, [{app1, ['~s@~s', '~s@~s', '~s@~s']},"
                       "{app2, 2000, ['~s@~s', '~s@~s', '~s@~s']},"
-                      "{app_sp, 1000, [{'~s@~s', '~s@~s'}, '~s@~s']}]}]}].~n",
-                      [Ncp1, M, Ncp2, M, Ncp3, M,
+                      "{app_sp, 1000, [{'~s@~s', '~s@~s'}, '~s@~s']},"
+                      "{app_no, 1000, ['~s@~s', '~s@~s']}]}]}].~n",
+                      [Ncp1, M, Ncp2, M, Ncp4, M,
                        SyncNodesTimeout,
                        Ncp1, M, Ncp2, M, Ncp3, M,
                        Ncp1, M, Ncp2, M, Ncp3, M,
-                       Ncp1, M, Ncp2, M, Ncp3, M])
+                       Ncp1, M, Ncp2, M, Ncp3, M,
+                       Ncp3, M, Ncp4, M])
+    end.
+
+config_fo4([_Ncp1, _Ncp2, Ncp3, Ncp4]) ->
+    fun(Fd, SyncNodesTimeout) ->
+            M = from($@, atom_to_list(node())),
+            io:format(Fd, "[{kernel, [{sync_nodes_optional, "
+                      "['~s@~s']},"
+                      "{sync_nodes_timeout, ~w},"
+                      "{distributed,"
+                      " [{app_no, 1000, ['~s@~s', '~s@~s']}]}]}].~n",
+                      [Ncp3, M,
+                       SyncNodesTimeout,
+                       Ncp3, M, Ncp4, M])
     end.
 
 config_dc([Ncp1, Ncp2, Ncp3]) ->
@@ -2642,6 +2816,10 @@ create_app() ->
     {ok, Fd3} = file:open(App3++".app",[write]),
     io:format(Fd3, "~p. \n", [app_sp()]),
     file:close(Fd3),
+    App4 = Dir ++ "app_no",
+    {ok, Fd4} = file:open(App4++".app",[write]),
+    io:format(Fd4, "~p. \n", [app_no()]),
+    file:close(Fd4),
     ok.
 
 
@@ -2656,12 +2834,30 @@ create_script(ScriptName) ->
 		    "{release, {\"Test release 3\", \"LATEST\"}, \n"
 		    " {erts, \"4.4\"}, \n"
 		    " [{kernel, \"~s\"}, {stdlib, \"~s\"}, \n"
-		    "  {app1, \"2.0\"}, {app2, \"2.0\"}, {app_sp, \"2.0\"}]}.\n",
+		    "  {app1, \"2.0\"}, {app2, \"2.0\"}, \n"
+		    "  {app_sp, \"2.0\"}, {app_no, \"1.0\"}]}.\n",
 		    [KernelVer,StdlibVer]),
     file:close(Fd),
     {{KernelVer,StdlibVer},
      {filename:dirname(Name), filename:basename(Name)}}.
 
+
+create_script_no(ScriptName) ->
+    Dir = "./",
+    Name = Dir ++ ScriptName,
+    Apps = which_applications(),
+    {value,{_,_,KernelVer}} = lists:keysearch(kernel,1,Apps),
+    {value,{_,_,StdlibVer}} = lists:keysearch(stdlib,1,Apps),
+    {ok,Fd} = file:open(Name++".rel",[write]),
+    io:format(Fd,
+		    "{release, {\"Test release 3\", \"LATEST\"}, \n"
+		    " {erts, \"4.4\"}, \n"
+		    " [{kernel, \"~s\"}, {stdlib, \"~s\"}, \n"
+		    "  {app_no, \"1.0\"}]}.\n",
+		    [KernelVer,StdlibVer]),
+    file:close(Fd),
+    {{KernelVer,StdlibVer},
+     {filename:dirname(Name), filename:basename(Name)}}.
 
 
 create_script_dc(ScriptName) ->
