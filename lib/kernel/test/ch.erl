@@ -33,29 +33,31 @@ start_link(Name) -> gen_server:start_link(ch, Name, []).
 %%----------------------------------------------------------------- 
 init(Name) ->
     process_flag(trap_exit, true),
-    global:re_register_name(Name, self()),
-    St = application:start_type(),
-    St1 = case St of
-	      normal ->
-		  normal;
-	      local ->
-		  local;
-	      {takeover, _N} ->
-		  takeover;
-	      {failover, _N} ->
-		  failover;
-	      Else ->
-		  Else
-	  end,
-
-    %% Slow start to make sure that applications are started
-    %% "at the same time". (otp_2973)
-    case Name of
-	{ch,77} -> timer:sleep(100);
-	_ -> ok
+    St = case application:start_type() of
+	normal ->
+	    normal;
+	local ->
+	    local;
+	{takeover, _N} ->
+	    takeover;
+	{failover, _N} ->
+	    failover;
+	Else ->
+	    Else
     end,
-
-    (catch global:send(Name, {st_type,{st, St1}})),
+    case Name of
+	{ch,77} ->
+	    %% Slow start to make sure that applications are started
+	    %% "at the same time". (otp_2973)
+	    timer:sleep(100),
+	    global:re_register_name(Name, self()),
+	    catch global:send(Name, {st_type,{st, St}});
+	{ch, N} when N < 34; N > 36 ->
+	    global:re_register_name(Name, self()),
+	    catch global:send(Name, {st_type,{st, St}});
+	_ ->
+	    self() ! {st_type,{st, St}}
+    end,
     {ok, []}.
 
 handle_call({get_pid_key, Key}, _, State) -> 
